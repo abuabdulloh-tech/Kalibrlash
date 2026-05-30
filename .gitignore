@@ -25,3 +25,5 @@ env/
 htmlcov/
 .tox/
 .nox/
+.spec/
+*.manifest

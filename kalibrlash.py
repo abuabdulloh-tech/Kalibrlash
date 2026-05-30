@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QGroupBox, QFileDialog, QAbstractItemView, QProgressBar,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 
 STYLE = """
 QMainWindow, QWidget { background-color: #fff; color: #222; }
@@ -470,12 +470,19 @@ class App(QMainWindow):
 
 
 def main():
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("reperkalibrlash.1.0")
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     font = app.font()
     font.setPointSize(10)
     app.setFont(font)
+    app.setWindowIcon(QIcon("icon.png"))
     w = App()
+    w.setWindowIcon(QIcon("icon.png"))
     w.show()
     sys.exit(app.exec())
 
