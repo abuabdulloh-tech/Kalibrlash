@@ -2,12 +2,11 @@ import sys, math
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTableWidget, QPushButton, QHeaderView, QLabel, QTextEdit,
-    QMessageBox, QGroupBox, QDoubleSpinBox, QFileDialog, QFrame,
-    QAbstractItemView, QProgressBar
+    QTableWidget, QTableWidgetItem, QPushButton, QHeaderView, QLabel, QTextEdit,
+    QMessageBox, QGroupBox, QFileDialog, QAbstractItemView, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont
 
 STYLE = """
 QMainWindow, QWidget { background-color: #fff; color: #222; }
@@ -18,15 +17,15 @@ QGroupBox {
 }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #333; }
 QTableWidget {
-    background-color: #fff; alternate-background-color: #f5f5f5;
-    gridline-color: #ddd; border: 1px solid #ccc; font-size: 14px;
+    background-color: #fff; alternate-background-color: #fafafa;
+    gridline-color: #e0e0e0; border: 1px solid #ccc; font-size: 13px;
 }
-QTableWidget::item { padding: 8px 12px; }
-QTableWidget::item:selected { background-color: #d0d0d0; color: #000; }
+QTableWidget::item { padding: 6px 10px; }
+QTableWidget::item:selected { background-color: #e8f0fe; color: #000; }
 QHeaderView::section {
-    background-color: #eee; color: #333; padding: 10px 12px;
-    border: none; border-bottom: 1px solid #ccc;
-    font-weight: bold; font-size: 13px;
+    background-color: #f0f0f0; color: #333; padding: 8px 10px;
+    border: none; border-bottom: 1px solid #ddd;
+    font-weight: bold; font-size: 12px;
 }
 QPushButton {
     background-color: #f0f0f0; color: #222;
@@ -41,12 +40,6 @@ QTextEdit {
     border: 1px solid #ccc; border-radius: 4px;
     padding: 10px; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;
 }
-QDoubleSpinBox {
-    background-color: #fff; color: #222;
-    border: 1px solid #bbb; border-radius: 3px;
-    padding: 6px 8px; font-size: 13px;
-}
-QDoubleSpinBox:disabled { background-color: #f0f0f0; color: #999; }
 QProgressBar { background-color: #eee; border: none; height: 4px; }
 QProgressBar::chunk { background-color: #4a90d9; }
 """
@@ -128,30 +121,21 @@ class ReperWidget(QWidget):
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         ml.addWidget(self.table)
-        for nm, ds, de, me in [("R-1", 0, 100.000, 100.003), ("R-2", 500, 105.000, 104.995), ("R-3", 1000, 110.000, 110.008)]:
+        for nm, ds, de, me in [("R-1", "0", "100.000", "100.003"), ("R-2", "500", "105.000", "104.995"), ("R-3", "1000", "110.000", "110.008")]:
             self.add_row_data(nm, ds, de, me)
-
-    def spin(self, lo, hi, val, dec):
-        s = QDoubleSpinBox()
-        s.setDecimals(dec)
-        s.setRange(lo, hi)
-        s.setValue(val)
-        return s
 
     def add_row_data(self, name, dist, design, measured):
         r = self.table.rowCount()
         self.table.insertRow(r)
-        self.table.setRowHeight(r, 34)
-        nl = QLabel(f"  {name}  ")
-        nl.setStyleSheet("font-size: 13px; padding: 0 6px;")
-        self.table.setCellWidget(r, 0, nl)
-        self.table.setCellWidget(r, 1, self.spin(0, 999999, dist, 3))
-        self.table.setCellWidget(r, 2, self.spin(-99999, 99999, design, 4))
-        self.table.setCellWidget(r, 3, self.spin(-99999, 99999, measured, 4))
+        self.table.setRowHeight(r, 30)
+        self.table.setItem(r, 0, QTableWidgetItem(name))
+        self.table.setItem(r, 1, QTableWidgetItem(dist))
+        self.table.setItem(r, 2, QTableWidgetItem(design))
+        self.table.setItem(r, 3, QTableWidgetItem(measured))
 
     def add_row(self):
         r = self.table.rowCount()
-        self.add_row_data(f"R-{r + 1}", r * 500 if r > 0 else 0, 100.0, 100.0)
+        self.add_row_data(f"R-{r + 1}", str(r * 500) if r > 0 else "0", "100.000", "100.000")
 
     def remove_selected(self):
         rows = set()
@@ -163,24 +147,25 @@ class ReperWidget(QWidget):
 
     def rename_all(self):
         for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, 0)
-            if w:
-                w.setText(f"  R-{r + 1}  ")
+            it = self.table.item(r, 0)
+            if it:
+                it.setText(f"R-{r + 1}")
 
     def get_data(self):
         data = []
         for r in range(self.table.rowCount()):
-            w0 = self.table.cellWidget(r, 0)
-            w1 = self.table.cellWidget(r, 1)
-            w2 = self.table.cellWidget(r, 2)
-            w3 = self.table.cellWidget(r, 3)
-            if all([w1, w2, w3]):
+            items = [self.table.item(r, c) for c in range(4)]
+            if not all(items):
+                continue
+            try:
                 data.append({
-                    "name": w0.text().strip() if w0 else f"R-{r+1}",
-                    "distance": w1.value(),
-                    "design": w2.value(),
-                    "measured": w3.value()
+                    "name": items[0].text().strip(),
+                    "distance": float(items[1].text()),
+                    "design": float(items[2].text()),
+                    "measured": float(items[3].text())
                 })
+            except ValueError:
+                pass
         return data
 
 
