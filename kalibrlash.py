@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView, QLabel, QTextEdit,
     QMessageBox, QGroupBox, QFileDialog, QAbstractItemView, QProgressBar,
-    QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -41,16 +40,7 @@ QTextEdit {
     border: 1px solid #ccc; border-radius: 4px;
     padding: 10px; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;
 }
-QComboBox {
-    background-color: #fff; color: #222;
-    border: 1px solid #bbb; border-radius: 3px;
-    padding: 4px 6px; font-size: 12px;
-}
-QComboBox::drop-down { border: none; width: 20px; }
-QComboBox QAbstractItemView {
-    background-color: #fff; color: #222;
-    selection-background-color: #e8f0fe;
-}
+
 QProgressBar { background-color: #eee; border: none; height: 4px; }
 QProgressBar::chunk { background-color: #4a90d9; }
 """
@@ -214,16 +204,16 @@ class ReperWidget(QWidget):
         hh.resizeSection(4, 250)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.cellDoubleClicked.connect(self.toggle_holat)
         ml.addWidget(self.table)
         for nm, ds, de, me, fx in [("R-1", "0", "100.000", "100.003", True), ("R-2", "500", "105.000", "104.995", False), ("R-3", "1000", "110.000", "110.008", False)]:
             self.add_row_data(nm, ds, de, me, fx)
 
-    def on_col_resized(self, col, old, new):
+    def toggle_holat(self, row, col):
         if col == 4:
-            for r in range(self.table.rowCount()):
-                cb = self.table.cellWidget(r, col)
-                if cb:
-                    cb.setMinimumWidth(new - 10)
+            it = self.table.item(row, 4)
+            if it:
+                it.setText("Turg'un" if it.text() == "Sozlanadi" else "Sozlanadi")
 
     def add_row_data(self, name, dist, design, measured, fixed=False):
         r = self.table.rowCount()
@@ -233,11 +223,9 @@ class ReperWidget(QWidget):
         self.table.setItem(r, 1, QTableWidgetItem(dist))
         self.table.setItem(r, 2, QTableWidgetItem(design))
         self.table.setItem(r, 3, QTableWidgetItem(measured))
-        cb = QComboBox()
-        cb.addItems(["Sozlanadi", "Turg'un"])
-        cb.setCurrentIndex(1 if fixed else 0)
-        cb.setMinimumWidth(self.table.columnWidth(4) - 10)
-        self.table.setCellWidget(r, 4, cb)
+        it = QTableWidgetItem("Turg'un" if fixed else "Sozlanadi")
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(r, 4, it)
 
     def add_row(self):
         r = self.table.rowCount()
@@ -261,9 +249,8 @@ class ReperWidget(QWidget):
     def get_data(self):
         data = []
         for r in range(self.table.rowCount()):
-            items = [self.table.item(r, c) for c in range(4)]
-            cb = self.table.cellWidget(r, 4)
-            if not all(items) or not cb:
+            items = [self.table.item(r, c) for c in range(5)]
+            if not all(items):
                 continue
             try:
                 data.append({
@@ -271,7 +258,7 @@ class ReperWidget(QWidget):
                     "distance": float(items[1].text()),
                     "design": float(items[2].text()),
                     "measured": float(items[3].text()),
-                    "fixed": cb.currentText() == "Turg'un"
+                    "fixed": items[4].text() == "Turg'un"
                 })
             except ValueError:
                 pass
