@@ -3,7 +3,8 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView, QLabel, QTextEdit,
-    QMessageBox, QGroupBox, QFileDialog, QAbstractItemView, QProgressBar
+    QMessageBox, QGroupBox, QFileDialog, QAbstractItemView, QProgressBar,
+    QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -40,48 +41,125 @@ QTextEdit {
     border: 1px solid #ccc; border-radius: 4px;
     padding: 10px; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;
 }
+QComboBox {
+    background-color: #fff; color: #222;
+    border: 1px solid #bbb; border-radius: 3px;
+    padding: 4px 6px; font-size: 12px;
+}
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background-color: #fff; color: #222;
+    selection-background-color: #e8f0fe;
+}
 QProgressBar { background-color: #eee; border: none; height: 4px; }
 QProgressBar::chunk { background-color: #4a90d9; }
 """
 
 
-def calibrate(repers):
+def network_adjust(repers):
     n = len(repers)
     if n < 2:
         return None, "Kamida 2 ta reper kerak"
+
+    segs = n - 1
     dists = np.array([r["distance"] for r in repers], dtype=float)
     design = np.array([r["design"] for r in repers], dtype=float)
     measured = np.array([r["measured"] for r in repers], dtype=float)
-    diff = measured - design
-    A = np.column_stack([np.ones(n), dists])
+    fixed = [r.get("fixed", False) for r in repers]
+
+    dh_meas = np.array([measured[i+1] - measured[i] for i in range(segs)])
+    dh_design = np.array([design[i+1] - design[i] for i in range(segs)])
+    dh_diff = dh_meas - dh_design
+
+    seg_dists = np.array([dists[i+1] - dists[i] for i in range(segs)])
+    sigma_per_km = 2.0
+    weights = np.array([1.0 / (sigma_per_km * math.sqrt(d / 1000.0) / 1000.0) ** 2 if d > 0 else 1e12 for d in seg_dists])
+
+    fixed_idx = [i for i in range(n) if fixed[i]]
+    adj_idx = [i for i in range(n) if not fixed[i]]
+    nu = len(adj_idx)
+    no = segs
+    if nu == 0:
+        return None, "Kamida 1 ta sozlanadigan reper kerak"
+    if no < 1:
+        return None, "O'lchovlar yo'q"
+
+    idx_map = {orig: new for new, orig in enumerate(adj_idx)}
+    fixed_height = {i: design[i] for i in fixed_idx}
+
+    A = np.zeros((no, nu))
+    l = np.zeros(no)
+    for i in range(segs):
+        rhs = dh_meas[i]
+        if i in fixed_height:
+            rhs -= -fixed_height[i]
+        if i + 1 in fixed_height:
+            rhs -= fixed_height[i + 1]
+        rhs = dh_meas[i]
+        if i in fixed_idx:
+            rhs -= -design[i]
+        if i + 1 in fixed_idx:
+            rhs -= design[i + 1]
+        rhs = dh_meas[i]
+        s = 0
+        if i in fixed_idx:
+            s -= design[i]
+        if i + 1 in fixed_idx:
+            s += design[i + 1]
+        rhs = dh_meas[i] - s
+
+        if i in adj_idx:
+            A[i, idx_map[i]] = -1
+        if i + 1 in adj_idx:
+            A[i, idx_map[i + 1]] = 1
+        l[i] = rhs
+
+    P = np.diag(weights)
     try:
-        coeffs, *_ = np.linalg.lstsq(A, diff, rcond=None)
-        a, b = float(coeffs[0]), float(coeffs[1])
+        N = A.T @ P @ A
+        b = A.T @ P @ l
+        U, S, Vt = np.linalg.svd(N)
+        rcond = max(N.shape) * np.finfo(float).eps * max(S)
+        S_inv = np.array([1 / s if s > rcond else 0 for s in S])
+        N_inv = Vt.T @ np.diag(S_inv) @ U.T
+        x = N_inv @ b
     except np.linalg.LinAlgError:
-        a, b = 0.0, 0.0
-    corrected = measured - (a + b * dists)
-    resid = diff - (a + b * dists)
-    ss_res = float(np.sum(resid ** 2))
-    ss_tot = float(np.sum((diff - np.mean(diff)) ** 2))
-    r2 = 1 - ss_res / ss_tot if ss_tot > 1e-15 else (1.0 if ss_res < 1e-15 else 0.0)
-    dof = max(n - 2, 0)
-    sigma = math.sqrt(ss_res / dof) if dof > 0 else 0.0
-    var_d = float(np.sum((dists - np.mean(dists)) ** 2))
-    if sigma > 0 and n > 2 and var_d > 1e-15:
-        se_a = sigma * math.sqrt(float(np.sum(dists ** 2)) / (n * var_d))
-        se_b = sigma / math.sqrt(var_d)
-    else:
-        se_a = 0.0
-        se_b = 0.0
-    mean_diff = float(np.mean(diff))
-    std_diff = float(np.std(diff, ddof=1)) if n > 1 and float(np.var(diff, ddof=1)) > 0 else 0.0
+        return None, "Matritsani yechib bo'lmadi"
+
+    v = A @ x - l
+    dof = no - nu
+    s02 = v.T @ P @ v / dof if dof > 0 else 0
+    s0 = math.sqrt(s02) if s02 > 0 else 0
+
+    Qxx = N_inv.copy()
+    Qvv = np.diag(1 / weights) - A @ Qxx @ A.T
+    w_stats = np.zeros(no)
+    for i in range(no):
+        qv = Qvv[i, i]
+        w_stats[i] = abs(v[i] / math.sqrt(qv)) if qv > 0 and s0 > 0 else 0
+
+    adj_heights = design.copy()
+    for orig, new in idx_map.items():
+        adj_heights[orig] = float(x[new])
+    stds = np.zeros(n)
+    for orig, new in idx_map.items():
+        stds[orig] = math.sqrt(Qxx[new, new]) * s0 if s0 > 0 else 0
+
+    outlier_idx = [i for i in range(no) if w_stats[i] > 3.29]
+
     return {
-        "diff": diff, "corrected": corrected, "resid": resid,
-        "a": a, "b": b, "r2": r2, "sigma": sigma,
-        "se_a": se_a, "se_b": se_b, "n": n,
+        "adj_heights": adj_heights, "stds": stds,
+        "s0": s0, "dof": dof, "n": n, "no": no, "nu": nu,
+        "v": v, "w_stats": w_stats, "seg_dists": seg_dists,
+        "dh_meas": dh_meas, "dh_design": dh_design,
+        "dh_diff": dh_diff, "outlier_idx": outlier_idx,
         "design": design, "measured": measured, "dists": dists,
-        "mean_diff": mean_diff, "std_diff": std_diff
+        "fixed": fixed, "seg_weights": weights
     }, None
+
+
+def calibrate(repers):
+    return network_adjust(repers)
 
 
 class Worker(QThread):
@@ -121,18 +199,19 @@ class ReperWidget(QWidget):
         br.addWidget(rb)
         br.addStretch()
         ml.addLayout(br)
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setAlternatingRowColors(True)
-        self.table.setHorizontalHeaderLabels(["Reper", "Masofa (m)", "Dizayn (m)", "O'lchangan (m)"])
+        self.table.setHorizontalHeaderLabels(["Reper", "Masofa (m)", "Dizayn (m)", "O'lchangan (m)", "Holat"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         ml.addWidget(self.table)
-        for nm, ds, de, me in [("R-1", "0", "100.000", "100.003"), ("R-2", "500", "105.000", "104.995"), ("R-3", "1000", "110.000", "110.008")]:
-            self.add_row_data(nm, ds, de, me)
+        for nm, ds, de, me, fx in [("R-1", "0", "100.000", "100.003", True), ("R-2", "500", "105.000", "104.995", False), ("R-3", "1000", "110.000", "110.008", False)]:
+            self.add_row_data(nm, ds, de, me, fx)
 
-    def add_row_data(self, name, dist, design, measured):
+    def add_row_data(self, name, dist, design, measured, fixed=False):
         r = self.table.rowCount()
         self.table.insertRow(r)
         self.table.setRowHeight(r, 30)
@@ -140,10 +219,15 @@ class ReperWidget(QWidget):
         self.table.setItem(r, 1, QTableWidgetItem(dist))
         self.table.setItem(r, 2, QTableWidgetItem(design))
         self.table.setItem(r, 3, QTableWidgetItem(measured))
+        cb = QComboBox()
+        cb.addItems(["Sozlanadi", "Turg'un"])
+        cb.setCurrentIndex(1 if fixed else 0)
+        self.table.setCellWidget(r, 4, cb)
 
     def add_row(self):
         r = self.table.rowCount()
-        self.add_row_data(f"R-{r + 1}", str(r * 500) if r > 0 else "0", "100.000", "100.000")
+        prev = f"{r * 500}" if r > 0 else "0"
+        self.add_row_data(f"R-{r + 1}", prev, "100.000", "100.000", False)
 
     def remove_selected(self):
         rows = set()
@@ -163,14 +247,16 @@ class ReperWidget(QWidget):
         data = []
         for r in range(self.table.rowCount()):
             items = [self.table.item(r, c) for c in range(4)]
-            if not all(items):
+            cb = self.table.cellWidget(r, 4)
+            if not all(items) or not cb:
                 continue
             try:
                 data.append({
                     "name": items[0].text().strip(),
                     "distance": float(items[1].text()),
                     "design": float(items[2].text()),
-                    "measured": float(items[3].text())
+                    "measured": float(items[3].text()),
+                    "fixed": cb.currentText() == "Turg'un"
                 })
             except ValueError:
                 pass
@@ -239,14 +325,14 @@ class App(QMainWindow):
     def calc(self):
         data = self.rw.get_data()
         if not data:
-            QMessageBox.warning(self, "Xatolik", "Ma'lumotlarni tekshiring.\nBarcha maydonlar to'g'ri to'ldirilganiga ishonch hosil qiling.")
+            QMessageBox.warning(self, "Xatolik", "Ma'lumotlarni tekshiring.")
             return
         if len(data) < 2:
             QMessageBox.warning(self, "Xatolik", "Kamida 2 ta reper kerak!")
             return
-        dists = [r["distance"] for r in data]
-        if all(d == dists[0] for d in dists):
-            QMessageBox.warning(self, "Ogohlantirish", "Masofalar bir xil. Kalibrlash faqat o'rtacha farqni hisoblaydi.")
+        if sum(1 for r in data if r.get("fixed")) == 0:
+            QMessageBox.warning(self, "Xatolik", "Kamida 1 ta turg'un reper belgilang!")
+            return
         self.pr.show()
         self.rb.setEnabled(False)
         self.out.setText("Hisoblanmoqda...")
@@ -273,62 +359,77 @@ class App(QMainWindow):
 
     def fmt(self, res, data):
         L = []
-        L.append("=" * 72)
-        L.append("  REPER KALIBRASH NATIJALARI")
-        L.append("=" * 72)
+        L.append("=" * 78)
+        L.append("  REPER KALIBRASH NATIJALARI  (tarmoq tenglashtirish)")
+        L.append("=" * 78)
         L.append("")
-        L.append("--- REPERLAR TAHLILI ---")
+
+        L.append("--- REPERLAR ---")
         L.append("")
-        L.append(f"  {'Reper':>6} {'Masofa':>10} {'Dizayn':>12} {"O'lchov":>12} {'Farq':>8} {'Tuzatilgan':>14}")
-        L.append("  " + "-" * 64)
+        L.append(f"  {'Reper':>6} {'Masofa':>10} {'Dizayn':>12} {'O\'lchov':>12} {'Farq(mm)':>10} {'Tuzatilgan':>14} {'Std(mm)':>10} {'Holat':>10}")
+        L.append("  " + "-" * 76)
         for i, rp in enumerate(data):
-            d = res["diff"][i]
-            corr = res["corrected"][i]
-            L.append(f"  {rp['name']:>6} {rp['distance']:>10.2f} {rp['design']:>12.4f} {rp['measured']:>12.4f} {d*1000:>7.2f} {corr:>14.4f}")
+            dh = (res["measured"][i] - res["design"][i]) * 1000
+            std = res["stds"][i] * 1000 if res["stds"][i] > 0 else 0
+            status = "TURG'UN" if res["fixed"][i] else "SOZLANDI"
+            L.append(f"  {rp['name']:>6} {res['dists'][i]:>10.2f} {res['design'][i]:>12.4f} {res['measured'][i]:>12.4f} {dh:>9.2f} {res['adj_heights'][i]:>14.4f} {std:>9.2f}  {status:>10}")
         L.append("")
+
+        L.append("--- SEGMENTLAR (qo'shni reperlar orasidagi farqlar) ---")
+        L.append("")
+        L.append(f"  {'Segment':>10} {'Masofa':>10} {'Dizayn(m)':>12} {'O\'lchov(m)':>12} {'Farq(mm)':>10} {'Qoldiq(mm)':>12} {'w-stat':>8} {'Holat':>12}")
+        L.append("  " + "-" * 78)
+        for i in range(res["no"]):
+            w = res["w_stats"][i]
+            outlier = "QO'POL!" if w > 3.29 else "OK"
+            L.append(f"  {data[i]['name']:>4}-{data[i+1]['name']:<4} {res['seg_dists'][i]:>10.2f} {res['dh_design'][i]:>12.4f} {res['dh_meas'][i]:>12.4f} {res['dh_diff'][i]*1000:>9.2f} {res['v'][i]*1000:>11.2f} {w:>7.2f}  {outlier:>12}")
+        L.append("")
+
         L.append("--- STATISTIK TAHLIL ---")
         L.append("")
-        L.append(f"  Reperlar soni:            {res['n']}")
-        L.append(f"  Ortacha farq:             {res['mean_diff']*1000:.2f} mm")
-        L.append(f"  Farqlarning std:          {res['std_diff']*1000:.2f} mm" if res['std_diff'] > 0 else f"  Farqlarning std:          {'—':>8}")
-        L.append(f"  Doimiy xato (a):          {res['a']*1000:+.4f} mm")
-        if res['n'] > 2:
-            L.append(f"  Masofaviy xato (b):       {res['b']*1e6:+.4f} mm/km")
+        L.append(f"  Reperlar soni:              {res['n']}")
+        L.append(f"  Segmentlar soni:            {res['no']}")
+        L.append(f"  Sozlanadigan nuqtalar:      {res['nu']}")
+        L.append(f"  Erkinlik darajasi:          {res['dof']}")
+        L.append(f"  Sigma0:                     {res['s0']*1000:.4f} mm")
+        if res["outlier_idx"]:
+            L.append(f"  Qo'pol xatolar:             {len(res['outlier_idx'])} ta segmentda")
         else:
-            L.append(f"  Masofaviy xato (b):       {'— (2 ta reper)':>15}")
-        if res['sigma'] > 0:
-            L.append(f"  Sigma0:                   {res['sigma']*1000:.4f} mm")
-        L.append(f"  R2 (determinatsiya):      {res['r2']:.6f}")
+            L.append(f"  Qo'pol xatolar:             aniqlanmadi")
         L.append("")
-        L.append("--- KALIBRASH TENGLAMASI ---")
+
+        if res["outlier_idx"]:
+            L.append("--- QO'POL XATOLI SEGMENTLAR ---")
+            L.append("")
+            for i in res["outlier_idx"]:
+                w = res["w_stats"][i]
+                L.append(f"  {data[i]['name']}-{data[i+1]['name']}:  w = {w:.2f}  (chegara: 3.29)")
+                L.append(f"    O'lchov farqi: {res['dh_meas'][i]:.4f}m, Dizayn farqi: {res['dh_design'][i]:.4f}m")
+                L.append(f"    Farq: {res['dh_diff'][i]*1000:.2f}mm, Qoldiq: {res['v'][i]*1000:.2f}mm")
+            L.append("")
+
+        L.append("--- KALIBRASH XULOSASI ---")
         L.append("")
-        if res['n'] > 2:
-            L.append(f"  H_tuzatilgan = H_olchangan - ({res['a']*1000:+.4f} mm + {res['b']*1e6:+.4f} mm/km * D)")
+        all_dh = [abs(res["dh_diff"][i]) * 1000 for i in range(res["no"])]
+        max_seg = max(all_dh) if all_dh else 0
+        max_pt = max([abs((res["measured"][i] - res["design"][i]) * 1000) for i in range(res["n"])])
+        L.append(f"  Eng katta segment farqi:    {max_seg:.2f} mm")
+        L.append(f"  Eng katta nuqta farqi:      {max_pt:.2f} mm")
+        L.append(f"  Turg'un reperlar:           {sum(res['fixed'])} ta")
+        L.append(f"  Sozlanadigan reperlar:      {res['nu']} ta")
+        L.append("")
+        if res["outlier_idx"]:
+            L.append("  DIQQAT: Qo'pol xatolar bor. Turg'un reperlarni tekshiring.")
+        elif res["s0"] < 2:
+            L.append("  Tarmoq yaxshi. Reperlar barqaror.")
+        elif res["s0"] < 5:
+            L.append("  Tarmoq qoniqarli. Kichik siljishlar bor.")
         else:
-            L.append(f"  H_tuzatilgan = H_olchangan - ({res['a']*1000:+.4f} mm)  (faqat doimiy xato)")
+            L.append("  Tarmoqda muammo bor. Reperlar holatini tekshiring.")
         L.append("")
-        L.append("--- QOLDIQLAR ---")
-        L.append("")
-        for i, rp in enumerate(data):
-            L.append(f"  {rp['name']:>6}: v = {res['resid'][i]*1000:+8.2f} mm")
-        L.append("")
-        L.append("--- XULOSA ---")
-        L.append("")
-        max_err = max(abs(res["diff"])) * 1000
-        if res['n'] == 2:
-            L.append(f"  Eng katta farq: {max_err:.2f} mm")
-            L.append("  Eslatma: 2 ta reper bilan faqat doimiy xato aniqlanadi.")
-        elif max_err < 3:
-            L.append(f"  Eng katta farq: {max_err:.2f} mm")
-            L.append("  Repyerlar yaroqli.")
-        elif max_err < 10:
-            L.append(f"  Eng katta farq: {max_err:.2f} mm")
-            L.append("  Repyerlar qoniqarli. Farqlar kuzatilmoqda.")
-        else:
-            L.append(f"  Eng katta farq: {max_err:.2f} mm")
-            L.append("  Repyerlarni qayta korib chiqish tavsiya etiladi.")
-        L.append("")
-        L.append("-" * 72)
+        L.append("-" * 78)
+        L.append("  GNU Gama mantig'ida tarmoq tenglashtirish | EKKU")
+        L.append("-" * 78)
         return "\n".join(L)
 
     def save(self):
@@ -349,9 +450,9 @@ class App(QMainWindow):
         if r == QMessageBox.StandardButton.Yes:
             while self.rw.table.rowCount():
                 self.rw.table.removeRow(0)
-            self.rw.add_row_data("R-1", "0", "100.000", "100.003")
-            self.rw.add_row_data("R-2", "500", "105.000", "104.995")
-            self.rw.add_row_data("R-3", "1000", "110.000", "110.008")
+            self.rw.add_row_data("R-1", "0", "100.000", "100.003", True)
+            self.rw.add_row_data("R-2", "500", "105.000", "104.995", False)
+            self.rw.add_row_data("R-3", "1000", "110.000", "110.008", False)
             self.out.clear()
             self.last = None
 
