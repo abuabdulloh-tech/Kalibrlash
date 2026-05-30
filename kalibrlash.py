@@ -49,30 +49,38 @@ def calibrate(repers):
     n = len(repers)
     if n < 2:
         return None, "Kamida 2 ta reper kerak"
-    dists = np.array([r["distance"] for r in repers])
-    design = np.array([r["design"] for r in repers])
-    measured = np.array([r["measured"] for r in repers])
+    dists = np.array([r["distance"] for r in repers], dtype=float)
+    design = np.array([r["design"] for r in repers], dtype=float)
+    measured = np.array([r["measured"] for r in repers], dtype=float)
     diff = measured - design
     A = np.column_stack([np.ones(n), dists])
     try:
         coeffs, *_ = np.linalg.lstsq(A, diff, rcond=None)
-        a, b = coeffs[0], coeffs[1]
+        a, b = float(coeffs[0]), float(coeffs[1])
     except np.linalg.LinAlgError:
         a, b = 0.0, 0.0
     corrected = measured - (a + b * dists)
     resid = diff - (a + b * dists)
-    ss_res = np.sum(resid ** 2)
-    ss_tot = np.sum((diff - np.mean(diff)) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-    dof = n - 2
-    sigma = math.sqrt(ss_res / dof) if dof > 0 and ss_res > 0 else 0
-    se_a = sigma * math.sqrt(np.sum(dists ** 2) / (n * np.sum((dists - np.mean(dists)) ** 2))) if sigma > 0 and n > 2 else 0
-    se_b = sigma / math.sqrt(np.sum((dists - np.mean(dists)) ** 2)) if sigma > 0 and n > 2 else 0
+    ss_res = float(np.sum(resid ** 2))
+    ss_tot = float(np.sum((diff - np.mean(diff)) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 1e-15 else (1.0 if ss_res < 1e-15 else 0.0)
+    dof = max(n - 2, 0)
+    sigma = math.sqrt(ss_res / dof) if dof > 0 else 0.0
+    var_d = float(np.sum((dists - np.mean(dists)) ** 2))
+    if sigma > 0 and n > 2 and var_d > 1e-15:
+        se_a = sigma * math.sqrt(float(np.sum(dists ** 2)) / (n * var_d))
+        se_b = sigma / math.sqrt(var_d)
+    else:
+        se_a = 0.0
+        se_b = 0.0
+    mean_diff = float(np.mean(diff))
+    std_diff = float(np.std(diff, ddof=1)) if n > 1 and float(np.var(diff, ddof=1)) > 0 else 0.0
     return {
         "diff": diff, "corrected": corrected, "resid": resid,
         "a": a, "b": b, "r2": r2, "sigma": sigma,
         "se_a": se_a, "se_b": se_b, "n": n,
-        "design": design, "measured": measured, "dists": dists
+        "design": design, "measured": measured, "dists": dists,
+        "mean_diff": mean_diff, "std_diff": std_diff
     }, None
 
 
@@ -230,9 +238,15 @@ class App(QMainWindow):
 
     def calc(self):
         data = self.rw.get_data()
-        if len(data) < 2:
-            QMessageBox.warning(self, "Xatolik", "Kamida 2 ta reper kiriting!")
+        if not data:
+            QMessageBox.warning(self, "Xatolik", "Ma'lumotlarni tekshiring.\nBarcha maydonlar to'g'ri to'ldirilganiga ishonch hosil qiling.")
             return
+        if len(data) < 2:
+            QMessageBox.warning(self, "Xatolik", "Kamida 2 ta reper kerak!")
+            return
+        dists = [r["distance"] for r in data]
+        if all(d == dists[0] for d in dists):
+            QMessageBox.warning(self, "Ogohlantirish", "Masofalar bir xil. Kalibrlash faqat o'rtacha farqni hisoblaydi.")
         self.pr.show()
         self.rb.setEnabled(False)
         self.out.setText("Hisoblanmoqda...")
@@ -244,6 +258,9 @@ class App(QMainWindow):
     def on_done(self, res):
         self.pr.hide()
         self.rb.setEnabled(True)
+        if res is None:
+            self.out.setText("Xatolik: hisoblash natijasi yo'q.")
+            return
         self.last = res
         data = self.rw.get_data()
         self.out.setPlainText(self.fmt(res, data))
@@ -272,17 +289,23 @@ class App(QMainWindow):
         L.append("--- STATISTIK TAHLIL ---")
         L.append("")
         L.append(f"  Reperlar soni:            {res['n']}")
-        L.append(f"  Ortacha farq:             {np.mean(res['diff'])*1000:.2f} mm")
-        if res['n'] > 1:
-            L.append(f"  Farqlarning std:          {np.std(res['diff'], ddof=1)*1000:.2f} mm")
+        L.append(f"  Ortacha farq:             {res['mean_diff']*1000:.2f} mm")
+        L.append(f"  Farqlarning std:          {res['std_diff']*1000:.2f} mm" if res['std_diff'] > 0 else f"  Farqlarning std:          {'—':>8}")
         L.append(f"  Doimiy xato (a):          {res['a']*1000:+.4f} mm")
-        L.append(f"  Masofaviy xato (b):       {res['b']*1e6:+.4f} mm/km")
-        L.append(f"  Sigma0:                   {res['sigma']*1000:.4f} mm")
+        if res['n'] > 2:
+            L.append(f"  Masofaviy xato (b):       {res['b']*1e6:+.4f} mm/km")
+        else:
+            L.append(f"  Masofaviy xato (b):       {'— (2 ta reper)':>15}")
+        if res['sigma'] > 0:
+            L.append(f"  Sigma0:                   {res['sigma']*1000:.4f} mm")
         L.append(f"  R2 (determinatsiya):      {res['r2']:.6f}")
         L.append("")
         L.append("--- KALIBRASH TENGLAMASI ---")
         L.append("")
-        L.append(f"  H_tuzatilgan = H_olchangan - ({res['a']*1000:+.4f} mm + {res['b']*1e6:+.4f} mm/km * D)")
+        if res['n'] > 2:
+            L.append(f"  H_tuzatilgan = H_olchangan - ({res['a']*1000:+.4f} mm + {res['b']*1e6:+.4f} mm/km * D)")
+        else:
+            L.append(f"  H_tuzatilgan = H_olchangan - ({res['a']*1000:+.4f} mm)  (faqat doimiy xato)")
         L.append("")
         L.append("--- QOLDIQLAR ---")
         L.append("")
@@ -292,12 +315,18 @@ class App(QMainWindow):
         L.append("--- XULOSA ---")
         L.append("")
         max_err = max(abs(res["diff"])) * 1000
-        if max_err < 3:
-            L.append("  Repyerlar yaroqli. Farqlar juda kichik.")
+        if res['n'] == 2:
+            L.append(f"  Eng katta farq: {max_err:.2f} mm")
+            L.append("  Eslatma: 2 ta reper bilan faqat doimiy xato aniqlanadi.")
+        elif max_err < 3:
+            L.append(f"  Eng katta farq: {max_err:.2f} mm")
+            L.append("  Repyerlar yaroqli.")
         elif max_err < 10:
+            L.append(f"  Eng katta farq: {max_err:.2f} mm")
             L.append("  Repyerlar qoniqarli. Farqlar kuzatilmoqda.")
         else:
-            L.append("  Repyerlarni qayta korib chiqish tavsiya etiladi. Farqlar katta.")
+            L.append(f"  Eng katta farq: {max_err:.2f} mm")
+            L.append("  Repyerlarni qayta korib chiqish tavsiya etiladi.")
         L.append("")
         L.append("-" * 72)
         return "\n".join(L)
@@ -308,17 +337,21 @@ class App(QMainWindow):
             return
         p, _ = QFileDialog.getSaveFileName(self, "Natijani saqlash", "kalibrlash_natijasi.txt", "Matn (*.txt)")
         if p:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(self.out.toPlainText())
+            try:
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(self.out.toPlainText())
+            except Exception as e:
+                QMessageBox.critical(self, "Xatolik", f"Faylga yozishda xatolik: {e}")
 
     def clear(self):
         r = QMessageBox.question(self, "Tozalash", "Barcha ma'lumotlarni tozalaysizmi?",
                                  QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if r == QMessageBox.StandardButton.Yes:
-            while self.rw.table.rowCount(): self.rw.table.removeRow(0)
-            self.rw.add_row_data("R-1", 0, 100.000, 100.003)
-            self.rw.add_row_data("R-2", 500, 105.000, 104.995)
-            self.rw.add_row_data("R-3", 1000, 110.000, 110.008)
+            while self.rw.table.rowCount():
+                self.rw.table.removeRow(0)
+            self.rw.add_row_data("R-1", "0", "100.000", "100.003")
+            self.rw.add_row_data("R-2", "500", "105.000", "104.995")
+            self.rw.add_row_data("R-3", "1000", "110.000", "110.008")
             self.out.clear()
             self.last = None
 
