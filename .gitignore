@@ -11,3 +11,17 @@ __pycache__/
 *.swp
 .idea/
 .vscode/
+build/
+dist/
+*.egg-info/
+.env/
+venv/
+env/
+*.egg
+*.log
+*.cover
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
