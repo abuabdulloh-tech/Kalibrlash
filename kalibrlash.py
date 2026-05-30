@@ -1,7 +1,6 @@
 import sys, math
 import numpy as np
 from PyQt6.QtWidgets import (
-    QSizePolicy,
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView, QLabel, QTextEdit,
     QMessageBox, QGroupBox, QFileDialog, QAbstractItemView, QProgressBar,
@@ -212,12 +211,19 @@ class ReperWidget(QWidget):
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        hh.resizeSection(4, 200)
+        hh.resizeSection(4, 250)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         ml.addWidget(self.table)
         for nm, ds, de, me, fx in [("R-1", "0", "100.000", "100.003", True), ("R-2", "500", "105.000", "104.995", False), ("R-3", "1000", "110.000", "110.008", False)]:
             self.add_row_data(nm, ds, de, me, fx)
+
+    def on_col_resized(self, col, old, new):
+        if col == 4:
+            for r in range(self.table.rowCount()):
+                cb = self.table.cellWidget(r, col)
+                if cb:
+                    cb.setMinimumWidth(new - 10)
 
     def add_row_data(self, name, dist, design, measured, fixed=False):
         r = self.table.rowCount()
@@ -230,7 +236,7 @@ class ReperWidget(QWidget):
         cb = QComboBox()
         cb.addItems(["Sozlanadi", "Turg'un"])
         cb.setCurrentIndex(1 if fixed else 0)
-        cb.setMinimumWidth(130)
+        cb.setMinimumWidth(self.table.columnWidth(4) - 10)
         self.table.setCellWidget(r, 4, cb)
 
     def add_row(self):
